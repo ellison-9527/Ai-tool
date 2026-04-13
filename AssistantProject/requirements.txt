@@ -1,0 +1,17 @@
+# 基础框架与大模型交互
+gradio~=6.10.0
+openai
+python-dotenv~=1.2.2
+requests~=2.33.1
+
+# 网络请求与网页抓取（可选工具）
+httpx~=0.28.1
+beautifulsoup4~=4.14.3
+websockets~=16.0
+
+# 核心：MCP 协议与适配器
+mcp
+langchain-mcp-adapters
+pypdf
+langchain-text-splitters
+pymilvus
