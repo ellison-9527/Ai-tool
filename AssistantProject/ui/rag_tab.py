@@ -15,7 +15,6 @@ def create_rag_tab():
         with gr.Column(scale=1):
             gr.Markdown("#### 1. 创建 / 追加知识库")
 
-            # ✅ 新增：让用户给知识库起名字
             kb_name_input = gr.Textbox(
                 label="知识库名称",
                 placeholder="例如: ai_docs_01 (仅限英文/数字/下划线)",
@@ -28,9 +27,18 @@ def create_rag_tab():
                 type="filepath"
             )
 
-            with gr.Accordion("高级解析设置", open=False):
+            # ====== 【优化 2：增加检索策略菜单】 ======
+            with gr.Accordion("⚙️ 解析与检索策略设置", open=False):
                 chunk_size = gr.Number(label="分块大小 (Chunk Size)", value=500)
                 chunk_overlap = gr.Number(label="分块重叠 (Overlap)", value=50)
+                gr.Markdown("---")
+                retrieval_strategy = gr.Dropdown(
+                    choices=["基础向量检索 (当前)", "混合检索 + BGE Rerank", "自适应 RAG"],
+                    label="检索模式",
+                    value="基础向量检索 (当前)",
+                    info="（开发中）选择不同的检索及重排算法模型"
+                )
+            # ========================================
 
             process_btn = gr.Button("🚀 解析并注入知识库", variant="primary")
             status_box = gr.Textbox(label="操作状态", lines=3, interactive=False)
@@ -39,14 +47,12 @@ def create_rag_tab():
             gr.Markdown("#### 2. 知识库管理")
 
             with gr.Row():
-                # ✅ 新增：可选择的知识库下拉菜单
                 kb_dropdown = gr.Dropdown(
                     choices=get_kb_list(),
                     label="选择当前工作的知识库",
                     interactive=True
                 )
                 refresh_kb_btn = gr.Button("🔄 刷新列表", size="sm")
-                # ✅ 新增：红色的删除按钮
                 delete_kb_btn = gr.Button("🗑️ 删除该库", size="sm", variant="stop")
 
             gr.Markdown("---")
@@ -65,7 +71,7 @@ def create_rag_tab():
         outputs=[kb_dropdown]
     )
 
-    # 解析并注入文件（将知识库名字和文件一起传给后端）
+    # 解析并注入文件（不把新增的前端组件传入后端，防止报错）
     process_btn.click(
         fn=process_and_store_documents,
         inputs=[uploaded_files, kb_name_input, chunk_size, chunk_overlap],
@@ -79,7 +85,7 @@ def create_rag_tab():
         outputs=[status_box, kb_dropdown]
     )
 
-    # 检索测试（需要知道去哪个知识库里搜）
+    # 检索测试
     test_btn.click(
         fn=retrieve_documents,
         inputs=[kb_dropdown, test_query],

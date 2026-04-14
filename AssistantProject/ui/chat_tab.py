@@ -3,18 +3,46 @@ import base64
 import re
 import uuid
 import mimetypes
+import asyncio
+import json
+import os
 import gradio as gr
 
-from AssistantProject.core.my_tts import tts
+from AssistantProject.core.my_tts import tts, stop_current_tts
 from AssistantProject.core.agent import simple_agent_chat, get_asr_text
 from AssistantProject.core.rag_manager import get_kb_list
 from AssistantProject.core.db_manager import get_all_sessions, load_session, save_session, delete_session
 
-# ... (后面的代码全都不用动) ...
+
+# ================= 工具函数：读取动态 Skill 配置 =================
+def get_dynamic_skills():
+    """从本地 JSON 文件读取最新的 Skill 列表"""
+    try:
+        with open("data/skills.json", "r", encoding="utf-8") as f:
+            skills = json.load(f)
+            return list(skills.keys())
+    except Exception:
+        # 如果还没创建 JSON，给一个空列表保底
+        return []
+
+
+def get_skill_prompts(selected_names):
+    """根据选中的专家名称，提取他们对应的 Prompt"""
+    try:
+        with open("data/skills.json", "r", encoding="utf-8") as f:
+            skills = json.load(f)
+            return [skills[name]["prompt"] for name in selected_names if name in skills]
+    except Exception:
+        return []
+
+
+# =============================================================
+
+CURRENT_PLAYING_TEXT = None
+TTS_TASK = None
 
 
 def generate_chat_title(state_messages):
-    """根据第一条消息自动生成对话标题"""
     title = "新对话"
     if state_messages:
         first_msg = state_messages[0]["content"]
@@ -30,28 +58,48 @@ def generate_chat_title(state_messages):
 
 
 def start_new_chat():
-    """新建对话：清空屏幕和游标，刷新列表"""
     return [], {"text": "", "files": []}, [], None, gr.update(choices=get_all_sessions(), value=None)
 
 
-async def play_latest_tts(history):
-    """抓取最后一条 AI 回复并进行语音播报"""
-    if not history:
-        gr.Warning("暂无对话可播报！")
+async def toggle_message_tts(evt: gr.SelectData):
+    """基于后台任务的点读机逻辑"""
+    global CURRENT_PLAYING_TEXT, TTS_TASK
+    clicked_text = evt.value
+
+    if not isinstance(clicked_text, str) or not clicked_text.strip() or "🤔 思考中" in clicked_text:
         return
 
-    # 倒序查找最后一条 assistant 的回复
-    for msg in reversed(history):
-        if msg["role"] == "assistant":
-            text = msg["content"]
-            if text and "🤔 思考中" not in text:
-                gr.Info("🔊 正在为您生成语音，请稍候...")
-                await tts(text)
-                return
+    if CURRENT_PLAYING_TEXT == clicked_text:
+        stop_current_tts()
+        if TTS_TASK and not TTS_TASK.done():
+            TTS_TASK.cancel()
+        CURRENT_PLAYING_TEXT = None
+        gr.Info("🛑 语音播报已停止")
+        return
 
-    gr.Warning("没有找到可以播报的 AI 回复！")
+    if CURRENT_PLAYING_TEXT:
+        stop_current_tts()
+        if TTS_TASK and not TTS_TASK.done():
+            TTS_TASK.cancel()
+
+    CURRENT_PLAYING_TEXT = clicked_text
+    gr.Info("🔊 开始播报，再次点击该文本即可中断...")
+    clean_text = clicked_text.replace("\n", " ")[:2000]
+
+    async def background_tts():
+        global CURRENT_PLAYING_TEXT
+        try:
+            await tts(clean_text)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if CURRENT_PLAYING_TEXT == clicked_text:
+                CURRENT_PLAYING_TEXT = None
+
+    TTS_TASK = asyncio.create_task(background_tts())
+
+
 def ui_delete_chat(display_name, current_chat_id):
-    """UI删除交互：删除数据库中的记录并按需清屏"""
     if not display_name:
         gr.Warning("请先在列表中选择要删除的对话！")
         return gr.update(), gr.update(), gr.update(), gr.update(), current_chat_id
@@ -59,16 +107,15 @@ def ui_delete_chat(display_name, current_chat_id):
     delete_session(display_name)
     gr.Info("对话已成功删除")
 
-    # 如果删除的恰好是当前正在看的对话，那就清空屏幕
     if current_chat_id and current_chat_id in display_name:
         return [], {"text": "", "files": []}, [], gr.update(choices=get_all_sessions(), value=None), None
     else:
-        # 否则只刷新列表，屏幕保留
         return gr.update(), gr.update(), gr.update(), gr.update(choices=get_all_sessions(), value=None), current_chat_id
 
 
-async def chat(message, history, state_messages, system_prompt, max_token, temperature, kb_name, target_model, current_chat_id):
-    """聊天主函数，集成了多模型聚合与 SQLite 自动保存"""
+# 【核心修改】：接收前端传来的 agent_mode 和 selected_skills
+async def chat(message, history, state_messages, system_prompt, max_token, temperature, kb_name, target_model,
+               current_chat_id, agent_mode, selected_skills):
     user = message.get("text", "")
     files = message.get("files", [])
 
@@ -100,15 +147,26 @@ async def chat(message, history, state_messages, system_prompt, max_token, tempe
     history.append({'role': 'user', 'content': user})
     history.append({"role": "assistant", "content": "正在思考中...", "metadata": {"title": "🤔 思考中"}})
 
-    # 【核心：使用 8 位短 UUID 作为数据库主键】
     if not current_chat_id:
         current_chat_id = uuid.uuid4().hex[:8]
 
     yield history, {"text": "", "files": []}, state_messages, current_chat_id
 
+    # ================== 多智能体 Prompt 融合逻辑 ==================
+    final_sys_prompt = system_prompt
+    if agent_mode == "👥 专家团队模式 (多智能体)" and selected_skills:
+        expert_prompts = get_skill_prompts(selected_skills)
+        if expert_prompts:
+            # 将所有选中的专家 Prompt 拼接起来，赋予 AI 多重人格
+            combined_experts = "\n\n".join([f"【专家角色设定】:\n{p}" for p in expert_prompts])
+            final_sys_prompt += f"\n\n你现在需要扮演一个多专家协作团队。以下是你拥有的子团队成员设定，请综合他们的专业视角，分步骤、全面地解答用户的问题：\n{combined_experts}"
+    # ============================================================
+
     try:
         is_first_response = True
-        async for event in simple_agent_chat(state_messages, system_prompt, max_token, temperature, target_model, kb_name):
+        # 【修改】：将融合后的 final_sys_prompt 传给核心 Agent
+        async for event in simple_agent_chat(state_messages, final_sys_prompt, max_token, temperature, target_model,
+                                             kb_name):
             if is_first_response:
                 if history and history[-1].get("metadata", {}).get("title") == "🤔 思考中":
                     history.pop()
@@ -133,14 +191,8 @@ async def chat(message, history, state_messages, system_prompt, max_token, tempe
                 yield history, gr.update(), state_messages, current_chat_id
 
         state_messages.append({"role": "assistant", "content": history[-1]["content"]})
-        # 保存到 SQLite 数据库
         title = generate_chat_title(state_messages)
         save_session(current_chat_id, title, history, state_messages)
-
-        # 【核心：静默保存到 SQLite 数据库】
-        title = generate_chat_title(state_messages)
-        save_session(current_chat_id, title, history, state_messages)
-        # ✅ 【重磅新增】：当文本全部生成完毕后，如果勾选了 TTS，则触发语音播报
 
     except Exception as e:
         if history and history[-1].get("metadata", {}).get("title") == "🤔 思考中":
@@ -155,7 +207,6 @@ def refresh_kb_choices():
 
 
 def create_chat_tab():
-    # 隐藏状态，用于追踪数据库中的 session_id
     current_chat_id = gr.State(None)
     state_messages = gr.State([])
 
@@ -163,16 +214,14 @@ def create_chat_tab():
         with gr.Column(scale=2):
             session_btn = gr.Button("+ 新建对话", variant="primary")
             gr.Markdown("---")
-            # 这里的下拉框直接从数据库获取数据
             history_dropdown = gr.Dropdown(choices=get_all_sessions(), label="📂 历史对话记录", interactive=True)
             with gr.Row():
                 refresh_btn = gr.Button("🔄 刷新", size="sm")
                 delete_btn = gr.Button("🗑️ 删除", size="sm", variant="stop")
 
         with gr.Column(scale=6):
+            gr.Markdown("💡 **交互提示:** 点击聊天框中的任意一条回答文字，即可开始语音播报；播报中再次点击即可停止。")
             chatbot = gr.Chatbot(label='agent', avatar_images=("./assert/user.png", "./assert/bot.png"), height=600)
-            with gr.Row():
-                tts_btn = gr.Button("🔊 朗读最新回复", size="sm", variant="secondary")
 
             chat_input = gr.MultimodalTextbox(
                 file_types=["image", "audio"],
@@ -183,7 +232,24 @@ def create_chat_tab():
             )
 
         with gr.Column(scale=2):
-            # 模型切换列表（前端展示名，后端真实名）
+            agent_mode = gr.Radio(
+                choices=["🤖 单体全能模式", "👥 专家团队模式 (多智能体)"],
+                label="Agent 运行模式",
+                value="🤖 单体全能模式"
+            )
+
+            with gr.Group(visible=False) as multi_agent_group:
+                gr.Markdown("#### 👨‍💻 参与协作的专家团队")
+                # 【动态加载】：启动时从 json 加载技能列表
+                multi_agent_checkboxes = gr.CheckboxGroup(
+                    choices=get_dynamic_skills(),
+                    value=[],
+                    label="选择本局对话启用的 Skill",
+                    interactive=True
+                )
+                refresh_skills_btn = gr.Button("🔄 刷新 Skill 列表", size="sm")
+            gr.Markdown("---")
+
             model_dropdown = gr.Dropdown(
                 choices=[
                     ("智谱 GLM-5.1", "glm-4-flash"),
@@ -202,49 +268,67 @@ def create_chat_tab():
                 clear_kb_btn = gr.Button("❌ 取消挂载", size="sm", variant="stop")
 
             gr.Markdown("---")
-            system_prompt = gr.Text(label="系统提示词", lines=2, value="你是一个精通编程和图像识别的 AI 助手。")
-            max_token = gr.Number(label="Maxtoken", value=4096, interactive=True)
-            temperature = gr.Number(label="temperature", value=0.5, interactive=True)
 
-    # --- 事件绑定 ---
-    # 1. 聊天发送
+            with gr.Accordion("⚙️ 高级对话设置", open=False):
+                system_prompt = gr.Text(label="系统提示词", lines=2, value="你是一个精通编程和图像识别的 AI 助手。")
+                max_token = gr.Number(label="Maxtoken", value=4096, interactive=True)
+                temperature = gr.Number(label="temperature", value=0.5, interactive=True)
+
+    # --- 界面动态交互逻辑 ---
+    def toggle_agent_mode(mode):
+        if mode == "👥 专家团队模式 (多智能体)":
+            return gr.update(visible=True)
+        return gr.update(visible=False)
+
+    agent_mode.change(
+        fn=toggle_agent_mode,
+        inputs=[agent_mode],
+        outputs=[multi_agent_group]
+    )
+
+    # 【新增刷新】：点击时从 json 重新读取最新数据
+    refresh_skills_btn.click(
+        fn=lambda: gr.update(choices=get_dynamic_skills()),
+        inputs=[],
+        outputs=[multi_agent_checkboxes]
+    )
+
+    # 【核心修改】：提交对话时，带上模式和选中的专家列表
     chat_input.submit(
         fn=chat,
         inputs=[
             chat_input, chatbot, state_messages,
             system_prompt, max_token, temperature,
-            kb_dropdown, model_dropdown, current_chat_id
+            kb_dropdown, model_dropdown, current_chat_id,
+            agent_mode, multi_agent_checkboxes  # 新增两个传参
         ],
         outputs=[chatbot, chat_input, state_messages, current_chat_id]
     )
 
-    # 2. 新建对话
+    chatbot.select(
+        fn=toggle_message_tts,
+        inputs=[],
+        outputs=[]
+    )
+
     session_btn.click(
         fn=start_new_chat,
         inputs=[],
         outputs=[chatbot, chat_input, state_messages, current_chat_id, history_dropdown]
     )
 
-    # 3. 读取数据库历史记录
     history_dropdown.select(
         fn=load_session,
         inputs=[history_dropdown],
         outputs=[chatbot, state_messages, current_chat_id]
     )
 
-    # 4. 删除历史记录
     delete_btn.click(
         fn=ui_delete_chat,
         inputs=[history_dropdown, current_chat_id],
         outputs=[chatbot, chat_input, state_messages, history_dropdown, current_chat_id]
     )
 
-    # 5. 刷新与取消
     refresh_btn.click(fn=lambda: gr.update(choices=get_all_sessions()), inputs=[], outputs=[history_dropdown])
     refresh_kb_btn.click(fn=refresh_kb_choices, inputs=[], outputs=[kb_dropdown])
     clear_kb_btn.click(fn=lambda: gr.update(value=None), inputs=[], outputs=[kb_dropdown])
-    tts_btn.click(
-        fn=play_latest_tts,
-        inputs=[chatbot],  # 把聊天记录传给函数提取文字
-        outputs=[]
-    )

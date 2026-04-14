@@ -3,9 +3,9 @@ import gradio as gr
 
 from ui.chat_tab import create_chat_tab
 from ui.mcp_tab import create_mcp_tab
-# 1. 导入 RAG 页面
 from ui.rag_tab import create_rag_tab
-
+# 【新增】引入刚才写好的 Skill 页面
+from ui.skill_tab import create_skill_tab
 
 def create_app():
     with gr.Blocks(title="AssistantPro") as demo:
@@ -17,19 +17,16 @@ def create_app():
                 create_chat_tab()
 
             with gr.Tab("📚 RAG 管理"):
-                # 2. 挂载 RAG 页面
                 create_rag_tab()
 
             with gr.Tab("🔌 MCP 配置"):
                 create_mcp_tab()
 
             with gr.Tab("🧩 Skill 配置"):
-                gr.Markdown("Skill 页面正在开发中...")
+                # 【修改】替换掉之前的 Markdown 提示，挂载页面
+                create_skill_tab()
 
     return demo
-
-
-
 
 if __name__ == "__main__":
     demo = create_app()
