@@ -10,7 +10,6 @@ from langchain_core.tools import tool
 
 from AssistantProject.core.tools import fetch_url, bash_execute, tavily_search
 from AssistantProject.core.rag_manager import retrieve_documents
-# 【新增导入 MCP 工具函数】
 from AssistantProject.core.mcp_manager import get_langchain_mcp_tools
 
 load_dotenv()

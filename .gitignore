@@ -34,3 +34,5 @@ history/
 
 # 日志
 *.log
+# 模型文件
+models/
