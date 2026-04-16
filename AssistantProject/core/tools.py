@@ -8,54 +8,82 @@ from langchain_tavily import TavilySearch
 from dotenv import load_dotenv
 
 load_dotenv()
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+try:
+    if os.getenv("TAVILY_API_KEY"):
+        tavily_search = TavilySearch()
+    else:
+        tavily_search = None
+except Exception:
+    tavily_search = None
 
 @tool
 def fetch_url(url: str) -> str:
-    """抓取指定 URL 网页内容并返回纯文本。用于获取在线文档、文章、博客等网页内容。"""
+    """抓取网页内容。"""
     try:
-        # 使用同步的 httpx 保持简单健壮
-        resp = httpx.get(
-            url,
-            timeout=30,
-            follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-        )
+        resp = httpx.get(url, timeout=30, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
-            tag.decompose()
-        text = soup.get_text(separator="\n", strip=True)
-        lines = [line for line in text.splitlines() if line.strip()]
-        return "\n".join(lines)[:8000]
-    except Exception as e:
-        return f"抓取失败: {str(e)}"
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]): tag.decompose()
+        return "\n".join([line for line in soup.get_text(separator="\n", strip=True).splitlines() if line.strip()])[:8000]
+    except Exception as e: return f"抓取失败: {e}"
 
 @tool
 def bash_execute(command: str) -> str:
-    """执行本地 shell 命令并返回输出。可运行 python, node, ls 等。"""
+    """执行本地 shell 命令。"""
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            encoding="utf-8",
-            errors="replace",
-        )
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace")
         output = result.stdout
-        if result.returncode != 0 and result.stderr:
-            output += f"\n[stderr]\n{result.stderr}"
-        if not output.strip():
-            output = f"(命令已执行，退出码: {result.returncode})"
-        return output[:8000]
-    except subprocess.TimeoutExpired:
-        return "执行超时（120秒限制）"
-    except Exception as e:
-        return f"执行错误: {e}"
+        if result.returncode != 0 and result.stderr: output += f"\n[stderr]\n{result.stderr}"
+        return output[:8000] if output.strip() else f"(执行成功，退出码: {result.returncode})"
+    except Exception as e: return f"执行失败: {e}"
 
-# 初始化 Tavily 联网搜索工具
-tavily_api_key = os.getenv("TAVILY_API_KEY")
-tavily_search = None
-if tavily_api_key:
-    tavily_search = TavilySearch(max_results=3, api_key=tavily_api_key)
+@tool
+def read_local_file(file_path: str) -> str:
+    """
+    【系统工具：读取本地文件】
+    当需要阅读某个本地代码、Markdown 或配置文件时使用。
+    必须传入相对于项目根目录的相对路径，例如：skills/get-time/references/api_doc.md
+    """
+    safe_path = os.path.abspath(os.path.join(PROJECT_ROOT, file_path))
+    if not safe_path.startswith(PROJECT_ROOT): return f"⚠️ 越权拒绝。"
+    try:
+        with open(safe_path, 'r', encoding='utf-8') as f: return f.read()
+    except Exception as e: return f"❌ 读取失败：{e}"
+
+@tool
+def execute_python_script(script_path: str, args: str = "") -> str:
+    """
+    【系统工具：执行本地 Python 脚本】
+    传入相对于项目根目录的相对路径，例如：skills/get-time/scripts/main.py
+    """
+    safe_path = os.path.abspath(os.path.join(PROJECT_ROOT, script_path))
+    if not os.path.exists(safe_path): return f"❌ 脚本未找到：{script_path}"
+    try:
+        cmd = ["python", safe_path]
+        if args: cmd.extend(args.split())
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        output = ""
+        if result.stdout: output += f"【STDOUT】\n{result.stdout}\n"
+        if result.stderr: output += f"【STDERR】\n{result.stderr}\n"
+        return f"✅ 执行成功！\n{output}" if result.returncode == 0 else f"⚠️ 执行异常：\n{output}"
+    except Exception as e: return f"❌ 失败：{e}"
+
+@tool
+def write_local_file(file_path: str, content: str) -> str:
+    """
+    【核心工具：写入本地文件 (OpenCode)】
+    当你需要创建新技能包(SKILL.md)、编写项目代码、保存文件时，直接调用此工具。
+    必须传入相对于项目根目录的相对路径，例如：skills/db-optimizer/SKILL.md
+    如果文件夹不存在，系统会自动为你创建！
+    """
+    safe_path = os.path.abspath(os.path.join(PROJECT_ROOT, file_path))
+    if not safe_path.startswith(PROJECT_ROOT): return f"⚠️ 越权拒绝。"
+    try:
+        os.makedirs(os.path.dirname(safe_path), exist_ok=True)
+        with open(safe_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return f"✅ 文件已成功写入物理路径：{file_path}"
+    except Exception as e:
+        return f"❌ 文件写入失败：{str(e)}"

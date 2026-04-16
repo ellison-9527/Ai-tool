@@ -12,28 +12,10 @@ from AssistantProject.core.my_tts import tts, stop_current_tts
 from AssistantProject.core.agent import simple_agent_chat, get_asr_text
 from AssistantProject.core.rag_manager import get_kb_list
 from AssistantProject.core.db_manager import get_all_sessions, load_session, save_session, delete_session
+from AssistantProject.core.skill_manager import get_skill_choices as get_dynamic_skills
+from AssistantProject.core.skill_manager import get_skill_prompts
 
 
-# ================= 工具函数：读取动态 Skill 配置 =================
-def get_dynamic_skills():
-    """从本地 JSON 文件读取最新的 Skill 列表"""
-    try:
-        with open("data/skills.json", "r", encoding="utf-8") as f:
-            skills = json.load(f)
-            return list(skills.keys())
-    except Exception:
-        # 如果还没创建 JSON，给一个空列表保底
-        return []
-
-
-def get_skill_prompts(selected_names):
-    """根据选中的专家名称，提取他们对应的 Prompt"""
-    try:
-        with open("data/skills.json", "r", encoding="utf-8") as f:
-            skills = json.load(f)
-            return [skills[name]["prompt"] for name in selected_names if name in skills]
-    except Exception:
-        return []
 
 
 # =============================================================
