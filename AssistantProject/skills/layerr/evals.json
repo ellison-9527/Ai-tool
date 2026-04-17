@@ -1,0 +1,20 @@
+{
+  "skill_name": "layerr",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我想知道劳动合同中应该包含哪些条款和条件？",
+      "expected_output": "详细的劳动合同条款和条件报告"
+    },
+    {
+      "id": 2,
+      "prompt": "我想知道加班费是如何计算的？",
+      "expected_output": "详细的加班费计算方法报告"
+    },
+    {
+      "id": 3,
+      "prompt": "我想知道年假的具体规定是什么？",
+      "expected_output": "详细的年假规定报告"
+    }
+  ]
+}

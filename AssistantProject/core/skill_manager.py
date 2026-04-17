@@ -40,42 +40,44 @@ def get_all_skills():
             skill_md = skill_folder / "SKILL.md"
             if skill_md.exists():
                 try:
-                    content = safe_read(skill_md)
-                    match = re.match(r'^---\s*\n(.*?)\n---\s*\n(.*)', content, re.DOTALL)
-                    if match:
-                        metadata = yaml.safe_load(match.group(1)) or {}
-                        prompt = match.group(2).strip()
+                    content = safe_read(skill_md).lstrip("\ufeff")
+                    parts = content.split("---")
+                    if len(parts) >= 3 and content.strip().startswith("---"):
+                        frontmatter_str = parts[1]
+                        body = "---".join(parts[2:]).strip()
+                        try:
+                            metadata = yaml.safe_load(frontmatter_str) or {}
+                        except Exception:
+                            metadata = {}
                     else:
                         metadata = {}
-                        prompt = content.strip()
+                        body = content.strip()
 
-                    # 扫描该扩展包下所有附带的文本文件
+                    name = metadata.get("name", skill_folder.name)
+                    description = metadata.get("description", "")
+
+                    # ==========================================
+                    # 【核心修改 1】：只扫描文件路径，不再粗暴地读取 file_content！
+                    # ==========================================
                     attached_files = []
                     for file_path in skill_folder.rglob("*"):
                         if file_path.is_file() and file_path.name != "SKILL.md":
                             if file_path.suffix.lower() in TEXT_EXTENSIONS:
-                                try:
-                                    file_content = safe_read(file_path)
-                                    rel_path = file_path.relative_to(skill_folder)
-                                    attached_files.append({
-                                        "path": str(rel_path),
-                                        "content": file_content
-                                    })
-                                except Exception:
-                                    pass
+                                rel_path = file_path.relative_to(skill_folder)
+                                attached_files.append({
+                                    "path": str(rel_path).replace("\\", "/")  # 统一转为正斜杠
+                                })
 
-                    name = metadata.get("name", skill_folder.name)
                     all_skills[name] = {
                         "folder": skill_folder.name,
-                        "description": metadata.get("description", ""),
-                        "prompt": prompt,
+                        "description": description,
+                        "prompt": body,
                         "path": str(skill_md),
                         "files": attached_files
                     }
                 except Exception as e:
                     print(f"⚠️ 解析技能 [{skill_folder.name}] 出错: {e}")
     return all_skills
-
 
 def get_skill_choices():
     return list(get_all_skills().keys())
@@ -84,7 +86,7 @@ def get_skill_choices():
 def load_skill_detail(skill_name):
     skills = get_all_skills()
     if skill_name in skills:
-        return skills[skill_name]["description"], skills[skill_name]["prompt"]
+        return skills[skill_name]["description"] or "", skills[skill_name]["prompt"] or ""
     return "", ""
 
 
@@ -107,7 +109,6 @@ def save_skill(old_name, new_name, desc, prompt, script_files=None, ref_files=No
     scripts_dir.mkdir(exist_ok=True)
     refs_dir.mkdir(exist_ok=True)
 
-    # 【容错修复】安全的判定数组真值
     if script_files is not None and isinstance(script_files, (list, tuple)):
         for fpath in script_files:
             shutil.copy(fpath, scripts_dir / Path(fpath).name)
@@ -149,11 +150,18 @@ def get_skill_prompts(selected_names):
             xml_parts.append(f"# Skill: {name}\n")
             xml_parts.append(skill["prompt"])
 
+            # ==========================================
+            # 【核心修改 2】：告诉大模型目录结构，引导它使用工具按需阅读
+            # ==========================================
             if skill["files"]:
-                xml_parts.append("\n<skill_files>")
+                xml_parts.append("\n<skill_files_directory_tree>")
+                xml_parts.append(
+                    "Note: The following attached files are available. Do NOT guess their content. You MUST use the `read_local_file` tool with the provided path to read their contents before executing related tasks.")
                 for f in skill["files"]:
-                    xml_parts.append(f'<file path="{f["path"]}" type="text">\n{f["content"]}\n</file>')
-                xml_parts.append("</skill_files>")
+                    # 拼装出完整的相对路径，方便大模型直接复制给 read_local_file 工具
+                    full_relative_path = f"skills/{skill['folder']}/{f['path']}"
+                    xml_parts.append(f'<file path="{full_relative_path}" type="reference_file"></file>')
+                xml_parts.append("</skill_files_directory_tree>")
 
             xml_parts.append('</skill_content>')
             combined.append("\n".join(xml_parts))

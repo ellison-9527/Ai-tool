@@ -1,6 +1,8 @@
 # app.py
 import gradio as gr
-
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ui.chat_tab import create_chat_tab
 from ui.mcp_tab import create_mcp_tab
 from ui.rag_tab import create_rag_tab
