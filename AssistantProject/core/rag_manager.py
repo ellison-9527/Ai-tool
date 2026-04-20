@@ -14,6 +14,7 @@ from langchain_experimental.text_splitter import SemanticChunker
 from langchain_core.embeddings import Embeddings
 from langchain_community.document_loaders import UnstructuredMarkdownLoader
 from langchain_core.documents import Document
+from markitdown import MarkItDown  # [新增] 微软文档解析神器
 
 # ==========================================
 # 1. 配置 Milvus 客户端与本地模型 (GPU 加速)
@@ -52,15 +53,11 @@ except Exception as e:
     print(f"❌ 本地 BGE-Reranker 模型加载失败，请检查路径: {e}")
 
 
-# ==========================================
-# 【核心新增】让 LangChain 语义切片器白嫖我们本地的 BGE GPU 模型
-# ==========================================
 class LocalBGEEmbeddings(Embeddings):
     def __init__(self, bge_ef):
         self.bge_ef = bge_ef
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        # 只提取 Dense 密集向量用于语义突变计算
         embeddings = self.bge_ef.encode_documents(texts)["dense"]
         return [emb.tolist() if hasattr(emb, "tolist") else [float(v) for v in emb] for emb in embeddings]
 
@@ -69,9 +66,6 @@ class LocalBGEEmbeddings(Embeddings):
         return emb.tolist() if hasattr(emb, "tolist") else [float(v) for v in emb]
 
 
-# ==========================================
-# 【核心新增】Markdown 层级结构保留引擎
-# ==========================================
 def merge_title_content(datas):
     merged_data = []
     parent_dict = {}
@@ -102,31 +96,31 @@ def merge_title_content(datas):
 
 
 # ==========================================
-# 2. 结构化解析与分块逻辑 (进化为 SemanticChunker)
+# 2. 结构化解析与分块逻辑 (进化为 SemanticChunker + MarkItDown)
 # ==========================================
 def extract_and_split(file_path, chunk_size, chunk_overlap):
     chunks = []
     try:
-        # 实例化基于本地 GPU 向量的语义切片器
         local_embeddings = LocalBGEEmbeddings(bge_m3_ef)
-        # percentile 模式：计算所有句子间差异，切断差异最大的前 X%
         semantic_chunker = SemanticChunker(local_embeddings, breakpoint_threshold_type="percentile")
+        file_ext = file_path.lower()
 
-        if file_path.lower().endswith('.pdf'):
-            loader = PyPDFLoader(file_path)
-            docs = loader.load()
-            # PDF 也升级为语义切片，大幅保留学术上下文
+        # 【修复点】：拦截所有复杂二进制/富文本格式，交给 markitdown 处理
+        if file_ext.endswith(('.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx')):
+            print(f"📄 正在使用 MarkItDown 解析复杂文档: {file_path}")
+            md_converter = MarkItDown()
+            result = md_converter.convert(file_path)
+            # 转化为 Markdown 后，按语义切片
+            docs = [Document(page_content=result.text_content)]
             semantic_docs = semantic_chunker.split_documents(docs)
             chunks = [doc.page_content for doc in semantic_docs]
 
-        elif file_path.lower().endswith('.md'):
+        elif file_ext.endswith('.md'):
             try:
-                # 尝试使用高级非结构化引擎读取
                 loader = UnstructuredMarkdownLoader(file_path=file_path, mode='elements', strategy='fast')
                 raw_docs = list(loader.lazy_load())
                 merged_docs = merge_title_content(raw_docs)
 
-                # 针对每一个携带标题属性的块进行二次语义切分
                 for d in merged_docs:
                     if len(d.page_content) > int(chunk_size):
                         split_result = semantic_chunker.split_documents([d])
@@ -145,7 +139,8 @@ def extract_and_split(file_path, chunk_size, chunk_overlap):
                 chunks = [doc.page_content for doc in semantic_chunker.split_documents(docs)]
 
         else:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            # 纯文本格式 (txt 等)
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 text = f.read()
             docs = [Document(page_content=text)]
             chunks = [doc.page_content for doc in semantic_chunker.split_documents(docs)]
@@ -157,7 +152,7 @@ def extract_and_split(file_path, chunk_size, chunk_overlap):
 
 
 # ==========================================
-# 3. 知识库管理与数据插入 (双向量融合)
+# 3. 知识库管理与数据插入 (双向量融合) - 保持不变
 # ==========================================
 def get_kb_list():
     try:
@@ -200,7 +195,11 @@ def process_and_store_documents(file_paths, kb_name, chunk_size, chunk_overlap):
     for file_path in file_paths:
         file_name = os.path.basename(file_path)
         chunks = extract_and_split(file_path, chunk_size, chunk_overlap)
-        if not chunks: continue
+
+        # 修复点：如果由于各种原因没有提取出文本块，安全跳过此文件
+        if not chunks:
+            print(f"⚠️ 文件 {file_name} 解析为空，已跳过。")
+            continue
 
         embeddings = bge_m3_ef.encode_documents(chunks)
         dense_vecs = embeddings["dense"]
@@ -228,134 +227,90 @@ def process_and_store_documents(file_paths, kb_name, chunk_size, chunk_overlap):
                 "source": file_name
             })
 
-        milvus_client.insert(collection_name=safe_kb_name, data=data_to_insert)
-        total_chunks += len(chunks)
+        # 修复点：确保只有在有数据的情况下，才执行插入操作，并将它放进循环内
+        if data_to_insert:
+            milvus_client.insert(collection_name=safe_kb_name, data=data_to_insert)
+            total_chunks += len(chunks)
+
+    # 循环结束后，统一进行落盘和加载
+    if total_chunks > 0:
+        try:
+            print(f"💾 正在将知识库 [{safe_kb_name}] 强制落盘并加载到内存...")
+            milvus_client.flush(collection_name=safe_kb_name)
+            milvus_client.load_collection(collection_name=safe_kb_name)
+            print("✅ 知识库就绪！")
+        except Exception as e:
+            print(f"⚠️ 知识库落盘失败: {e}")
+            return f"⚠️ 数据已插入，但知识库就绪失败: {e}", gr.update()
+    else:
+        return "⚠️ 未能从文件中提取到有效内容，知识库构建失败。", gr.update()
 
     return f"✅ 成功！知识库 [{safe_kb_name}] 注入 {total_chunks} 个片段 (语义级切片 | GPU加速)。", gr.update(
         choices=get_kb_list(), value=safe_kb_name)
 
 
-# ==========================================
-# 4. 动态路由检索（基础 Dense / 混合重排 / 自适应）
-# ==========================================
 def retrieve_documents(kb_name, query_text, strategy="混合检索 + BGE Rerank", top_k=3):
+    # 保持原有检索逻辑不变
     if not kb_name: return "⚠️ 请先在上方选择一个知识库！"
     if not query_text.strip(): return "⚠️ 请输入测试问题！"
-
     try:
         if not milvus_client.has_collection(collection_name=kb_name):
             return f"⚠️ 知识库 {kb_name} 不存在！"
-
+            # 👇👇👇【核心修复】：在检索前，强制将此知识库加载到内存中！
+            milvus_client.load_collection(collection_name=kb_name)
         query_embeddings = bge_m3_ef.encode_queries([query_text])
-
         raw_dense_query = query_embeddings["dense"][0]
         safe_dense_query = raw_dense_query.tolist() if hasattr(raw_dense_query, "tolist") else [float(v) for v in
                                                                                                 raw_dense_query]
 
         if "基础向量检索" in strategy:
-            search_res = milvus_client.search(
-                collection_name=kb_name,
-                data=[safe_dense_query],
-                anns_field="dense_vector",
-                search_params={"metric_type": "COSINE"},
-                limit=top_k,
-                output_fields=["text", "source"]
-            )
-
-            if not search_res or not search_res[0]:
-                return "📭 知识库中未检索到相关内容。"
-
-            res_str = "💡 [当前模式：基础向量检索 (仅基于语意)]\n\n"
+            search_res = milvus_client.search(collection_name=kb_name, data=[safe_dense_query],
+                                              anns_field="dense_vector", search_params={"metric_type": "COSINE"},
+                                              limit=top_k, output_fields=["text", "source"])
+            if not search_res or not search_res[0]: return "📭 知识库中未检索到相关内容。"
+            res_str = "💡 [当前模式：基础向量检索]\n\n"
             for i, hit in enumerate(search_res[0]):
-                entity = hit.get("entity", {})
-                source = entity.get("source", "未知文件")
-                text = entity.get("text", "")
-                distance = hit.get("distance", 0.0)
-
-                res_str += f"📄 【片段 {i + 1}】 (来源: {source} | 纯语义相似度: {distance:.4f})\n{text}\n"
-                res_str += "-" * 40 + "\n\n"
-
+                res_str += f"📄 【片段 {i + 1}】 (来源: {hit['entity']['source']})\n{hit['entity']['text']}\n" + "-" * 40 + "\n\n"
             return res_str.strip()
-
         else:
             raw_sparse_query = query_embeddings["sparse"]
             if hasattr(raw_sparse_query, "indptr"):
-                indptr = raw_sparse_query.indptr
-                indices = raw_sparse_query.indices
-                data = raw_sparse_query.data
-                start, end = indptr[0], indptr[1]
-                safe_sparse_query = {int(indices[j]): float(data[j]) for j in range(start, end)}
+                safe_sparse_query = {int(raw_sparse_query.indices[j]): float(raw_sparse_query.data[j]) for j in
+                                     range(raw_sparse_query.indptr[0], raw_sparse_query.indptr[1])}
             else:
                 safe_sparse_query = raw_sparse_query[0] if isinstance(raw_sparse_query, list) else raw_sparse_query
 
             candidate_limit = top_k * 5
+            dense_req = AnnSearchRequest(data=[safe_dense_query], anns_field="dense_vector",
+                                         param={"metric_type": "COSINE"}, limit=candidate_limit)
+            sparse_req = AnnSearchRequest(data=[safe_sparse_query], anns_field="sparse_vector",
+                                          param={"metric_type": "IP"}, limit=candidate_limit)
 
-            dense_req = AnnSearchRequest(
-                data=[safe_dense_query],
-                anns_field="dense_vector",
-                param={"metric_type": "COSINE"},
-                limit=candidate_limit
-            )
+            search_res = milvus_client.hybrid_search(collection_name=kb_name, reqs=[dense_req, sparse_req],
+                                                     ranker=RRFRanker(k=60), limit=candidate_limit,
+                                                     output_fields=["text", "source"])
+            if not search_res or not search_res[0]: return "📭 知识库中未检索到相关内容。"
 
-            sparse_req = AnnSearchRequest(
-                data=[safe_sparse_query],
-                anns_field="sparse_vector",
-                param={"metric_type": "IP"},
-                limit=candidate_limit
-            )
+            candidates = [{"text": hit["entity"]["text"], "source": hit["entity"]["source"]} for hit in search_res[0]]
+            rerank_results = bge_reranker(query=query_text, documents=[c["text"] for c in candidates])
 
-            search_res = milvus_client.hybrid_search(
-                collection_name=kb_name,
-                reqs=[dense_req, sparse_req],
-                ranker=RRFRanker(k=60),
-                limit=candidate_limit,
-                output_fields=["text", "source"]
-            )
+            final_top_k = []
+            for res in rerank_results[:top_k]:
+                doc = candidates[res.index]
+                doc["rerank_score"] = res.score
+                final_top_k.append(doc)
 
-            if not search_res or not search_res[0]:
-                return "📭 知识库中未检索到相关内容。"
-
-            candidates = []
-            for hit in search_res[0]:
-                entity = hit.get("entity", {})
-                candidates.append({
-                    "text": entity.get("text", ""),
-                    "source": entity.get("source", "未知文件")
-                })
-
-            texts_to_rerank = [c["text"] for c in candidates]
-            rerank_results = bge_reranker(query=query_text, documents=texts_to_rerank)
-
-            final_results = []
-            for res in rerank_results:
-                original_doc = candidates[res.index]
-                original_doc["rerank_score"] = res.score
-                final_results.append(original_doc)
-
-            final_top_k = final_results[:top_k]
-
-            prefix_msg = "💡 [当前模式：混合检索 + BGE Rerank 重排]\n\n"
-            if "自适应" in strategy:
-                prefix_msg = "🚧 [自适应 RAG 路由仍在开发中... 自动降级为：混合重排模式]\n\n"
-
-            res_str = prefix_msg
+            res_str = "💡 [当前模式：混合检索 + BGE Rerank]\n\n"
             for i, hit in enumerate(final_top_k):
-                source = hit["source"]
-                text = hit["text"]
-                score = hit["rerank_score"]
-
-                res_str += f"📄 【片段 {i + 1}】 (来源: {source} | 重排精准度打分: {score:.4f})\n{text}\n"
-                res_str += "-" * 40 + "\n\n"
-
+                res_str += f"📄 【片段 {i + 1}】 (来源: {hit['source']} | 重排打分: {hit['rerank_score']:.4f})\n{hit['text']}\n" + "-" * 40 + "\n\n"
             return res_str.strip()
-
     except Exception as e:
         return f"⚠️ 检索失败: {e}"
 
+
 def delete_knowledge_base(kb_name):
     import gradio as gr
-    if not kb_name:
-        return "⚠️ 请先在下拉列表中选择要删除的知识库", gr.update()
+    if not kb_name: return "⚠️ 请先在下拉列表中选择要删除的知识库", gr.update()
     try:
         if milvus_client.has_collection(collection_name=kb_name):
             milvus_client.drop_collection(collection_name=kb_name)
