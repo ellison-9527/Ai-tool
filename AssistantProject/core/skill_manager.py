@@ -166,3 +166,25 @@ def get_skill_prompts(selected_names):
             xml_parts.append('</skill_content>')
             combined.append("\n".join(xml_parts))
     return combined
+
+def get_skill_prompts_map(selected_names):
+    skills = get_all_skills()
+    expert_map = {}
+    for name in selected_names:
+        if name in skills:
+            skill = skills[name]
+            xml_parts = [f'<skill_content name="{name}">']
+            xml_parts.append(f"# Skill: {name}\n")
+            xml_parts.append(skill["prompt"])
+            
+            if skill["files"]:
+                xml_parts.append("\n<skill_files_directory_tree>")
+                xml_parts.append("Note: The following attached files are available. Do NOT guess their content. You MUST use the `read_local_file` tool with the provided path to read their contents before executing related tasks.")
+                for f in skill["files"]:
+                    full_relative_path = f"skills/{skill['folder']}/{f['path']}"
+                    xml_parts.append(f'<file path="{full_relative_path}" type="reference_file"></file>')
+                xml_parts.append("</skill_files_directory_tree>")
+            
+            xml_parts.append('</skill_content>')
+            expert_map[name] = "\n".join(xml_parts)
+    return expert_map

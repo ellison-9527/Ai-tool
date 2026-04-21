@@ -4,8 +4,9 @@ import base64
 import requests
 from openai import OpenAI
 from dotenv import load_dotenv
+from AssistantProject.core.logger import logger
 
-load_dotenv()
+load_dotenv(override=True)
 
 # 兼容两种环境变量命名方式，获取 API Key
 api_key = os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY")
@@ -18,11 +19,13 @@ client = OpenAI(
 
 def get_asr_text(file_path):
     """调用智谱 ASR 接口将语音转为文字"""
-    print(f"【后端日志】开始处理音频文件: {file_path}")
+    logger.info(f"🎤 [多模态] 开始处理音频文件: {file_path}")
     url = "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions"
-
+    
+    # ASR 强制使用专属的智谱 Key
+    zhipu_key = os.getenv("ZHIPU_API_KEY") or api_key
     headers = {
-        "Authorization": api_key  # 使用修正后的 api_key
+        "Authorization": zhipu_key 
     }
     try:
         with open(file_path, "rb") as f:
@@ -33,10 +36,10 @@ def get_asr_text(file_path):
             result = response.json()
 
             text = result.get("text", "")
-            print(f"【后端日志】语音识别成功: {text}")
+            logger.info(f"✅ [多模态] 语音识别成功: {text}")
             return text
     except Exception as e:
-        print(f"【后端日志】语音识别出错: {e}")
+        logger.error(f"❌ [多模态] 语音识别出错: {e}")
         return ""
 
 
@@ -93,12 +96,12 @@ def process_multimodal_chat(message_dict, history, sys_prompt, max_token, temp):
     # ==========================================
     if not actual_images:
         # 场景 A：没有图片，强制使用纯文本模型，发送字符串格式
-        target_model = "glm-4-flash"
+        target_model = "glm-4-plus"
         messages.append({"role": "user", "content": combined_text})
-        print(f"【后端日志】未检测到图片，使用文本模型: {target_model}")
+        logger.info(f"🧠 [模型路由] 未检测到图片，使用文本模型: {target_model}")
     else:
         # 场景 B：有图片，使用视觉模型，发送多模态列表格式
-        target_model = os.getenv("MODEL_NAME", "glm-4v")
+        target_model = os.getenv("MODEL_NAME", "glm-4-plus")
         current_content = []
         if combined_text:
             current_content.append({"type": "text", "text": combined_text})
@@ -110,7 +113,7 @@ def process_multimodal_chat(message_dict, history, sys_prompt, max_token, temp):
                 "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}
             })
         messages.append({"role": "user", "content": current_content})
-        print(f"【后端日志】检测到图片，使用视觉模型: {target_model}")
+        logger.info(f"👁️ [模型路由] 检测到图片，使用视觉模型: {target_model}")
 
     try:
         response = client.chat.completions.create(

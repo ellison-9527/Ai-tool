@@ -4,6 +4,7 @@ import sys
 import json
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from AssistantProject.core.logger import logger
 
 # 配置文件路径
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "mcp_server.json")
@@ -25,8 +26,10 @@ async def get_langchain_mcp_tools():
                         cfg_copy = config.copy()
                         cfg_copy.pop("enable", None)
                         active_servers[name] = cfg_copy
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ MCP 配置文件 JSON 格式错误: {e}")
             except Exception as e:
-                print(f"⚠️ 读取 MCP 配置文件失败: {e}")
+                logger.error(f"⚠️ 读取 MCP 配置文件失败: {e}")
 
         # 2. 【核心新增】代码层动态注入我们刚刚写好的“可视化服务”
         if os.path.exists(VISUALIZATION_SCRIPT_PATH):
@@ -35,7 +38,7 @@ async def get_langchain_mcp_tools():
                 "args": [VISUALIZATION_SCRIPT_PATH],
                 "transport": "stdio"  # <--- 【新增这行】显式声明通信协议
             }
-            print("📊 成功将 [可视化数据] MCP Server 加入挂载队列！")
+            logger.info("📊 成功将 [可视化数据] MCP Server 加入挂载队列！")
     # 如果没有任何服务，直接返回空
     if not active_servers:
         return []
@@ -45,7 +48,7 @@ async def get_langchain_mcp_tools():
         mcp_client = MultiServerMCPClient(active_servers)
         return await mcp_client.get_tools()
     except Exception as e:
-        print(f"【MCP引擎】连接外部服务失败: {e}")
+        logger.error(f"❌ 【MCP引擎】连接外部服务失败，请检查服务路径或依赖: {e}")
         return []
 
 

@@ -12,26 +12,15 @@ from AssistantProject.core.my_tts import tts, stop_current_tts
 from AssistantProject.core.agent import simple_agent_chat, get_asr_text
 from AssistantProject.core.rag_manager import get_kb_list
 from AssistantProject.core.db_manager import get_all_sessions, load_session, save_session, delete_session
-from AssistantProject.core.skill_manager import get_skill_choices as get_dynamic_skills
-from AssistantProject.core.skill_manager import get_skill_prompts
+from AssistantProject.core.skill_manager import get_skill_prompts_map, get_skill_choices as get_dynamic_skills
+from AssistantProject.core.logger import logger
+from AssistantProject.core.utils import generate_chat_title, process_user_input, extract_markdown_images
 
 CURRENT_PLAYING_TEXT = None
 TTS_TASK = None
 
 
-def generate_chat_title(state_messages):
-    title = "新对话"
-    if state_messages:
-        first_msg = state_messages[0]["content"]
-        if isinstance(first_msg, str):
-            title = first_msg
-        elif isinstance(first_msg, list):
-            for item in first_msg:
-                if item.get("type") == "text" and item.get("text").strip():
-                    title = item.get("text")
-                    break
-    title = re.sub(r'[\\/*?:"<>|\n\r]', "", title).strip()
-    return title[:15] if title else "图片对话"
+
 
 
 def start_new_chat():
@@ -84,37 +73,14 @@ def ui_delete_chat(display_name, current_chat_id):
 
 async def chat(message, history, state_messages, system_prompt, max_token, temperature, kb_name, target_model,
                current_chat_id, agent_mode, selected_skills):
-    user = message.get("text", "")
+    user_text = message.get("text", "")
     files = message.get("files", [])
 
-    if not user.strip() and not files:
+    is_valid, history, state_messages, user_input_for_agent = process_user_input(user_text, files, history, state_messages)
+    if not is_valid:
         gr.Warning("不能发送空消息哦！")
         yield history, {"text": "", "files": []}, state_messages, current_chat_id
         return
-
-    if files:
-        mutil_content = []
-        for file in files:
-            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
-                history.append({"role": "user", "content": {"path": file}})
-                with open(file, "rb") as img_file:
-                    img_base = base64.b64encode(img_file.read()).decode("utf-8")
-                    mime_type, _ = mimetypes.guess_type(file)
-                    mime_type = mime_type or "image/jpeg"
-                    mutil_content.append(
-                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{img_base}"}})
-            elif file.lower().endswith(('.wav', '.mp3', '.m4a', '.webm', '.ogg')):
-                user_audio_text = get_asr_text(file)
-                user = (user + " " + user_audio_text).strip()
-        mutil_content.append({"type": "text", "text": user})
-        state_messages.append({"role": "user", "content": mutil_content})
-        user_input_for_agent = mutil_content
-    else:
-        state_messages.append({"role": "user", "content": user})
-        user_input_for_agent = user
-
-    history.append({'role': 'user', 'content': user})
-    history.append({"role": "assistant", "content": "正在思考中...", "metadata": {"title": "🤔 思考中"}})
 
     if not current_chat_id:
         current_chat_id = uuid.uuid4().hex[:8]
@@ -122,11 +88,9 @@ async def chat(message, history, state_messages, system_prompt, max_token, tempe
     yield history, {"text": "", "files": []}, state_messages, current_chat_id
 
     final_sys_prompt = system_prompt
+    expert_prompts_map = None
     if agent_mode == "👥 专家团队模式 (多智能体)" and selected_skills:
-        expert_prompts = get_skill_prompts(selected_skills)
-        if expert_prompts:
-            combined_experts = "\n\n".join([f"【专家角色设定】:\n{p}" for p in expert_prompts])
-            final_sys_prompt += f"\n\n你现在需要扮演一个多专家协作团队。综合他们的专业视角全面解答：\n{combined_experts}"
+        expert_prompts_map = get_skill_prompts_map(selected_skills)
 
     try:
         is_first_response = True
@@ -137,7 +101,8 @@ async def chat(message, history, state_messages, system_prompt, max_token, tempe
                 temperature=temperature,
                 target_model=target_model,
                 thread_id=current_chat_id,
-                kb_name=kb_name
+                kb_name=kb_name,
+                expert_prompts_map=expert_prompts_map
         ):
             if is_first_response:
                 if history and history[-1].get("metadata", {}).get("title") == "🤔 思考中":
@@ -180,18 +145,7 @@ async def chat(message, history, state_messages, system_prompt, max_token, tempe
             raw_text = history[-1]["content"]
             state_messages.append({"role": "assistant", "content": raw_text})
 
-            extracted_images = []
-
-            def extract_and_remove(match):
-                filepath = match.group(2)
-                if filepath.startswith("/file="): filepath = filepath[6:]
-                filepath = urllib.parse.unquote(filepath)
-
-                if os.path.exists(filepath):
-                    extracted_images.append(filepath)
-                return ""  # 从纯文本气泡中删除图片占位符
-
-            clean_final_text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', extract_and_remove, raw_text).strip()
+            clean_final_text, extracted_images = extract_markdown_images(raw_text)
 
             if clean_final_text:
                 history[-1]["content"] = clean_final_text
@@ -212,8 +166,7 @@ async def chat(message, history, state_messages, system_prompt, max_token, tempe
         save_session(current_chat_id, title, history, state_messages)
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌ UI 层聊天代理发生异常: {str(e)}", exc_info=True)
         if history and history[-1].get("metadata", {}).get("title") == "🤔 思考中":
             history.pop()
         history.append({"role": "assistant", "content": f"⚠️ 系统内部错误: {str(e)}"})
@@ -243,13 +196,16 @@ def create_chat_tab():
             # 开启原生多模态组件支持
             chatbot = gr.Chatbot(label='agent', avatar_images=("./assert/user.png", "./assert/bot.png"), height=600)
 
-            chat_input = gr.MultimodalTextbox(
-                file_types=["image", "audio"],
-                file_count="multiple",
-                placeholder="请输入消息，或点击右侧上传图片/录音...",
-                show_label=False,
-                sources=["upload", "microphone"]
-            )
+            with gr.Row():
+                chat_input = gr.MultimodalTextbox(
+                    scale=9,
+                    file_types=["image", "audio"],
+                    file_count="multiple",
+                    placeholder="请输入消息，或点击右侧上传图片/录音...",
+                    show_label=False,
+                    sources=["upload", "microphone"]
+                )
+                stop_btn = gr.Button("🛑 停止", variant="stop", visible=False, scale=1, min_width=60)
 
         with gr.Column(scale=2):
             agent_mode = gr.Radio(choices=["🤖 单体全能模式", "👥 专家团队模式 (多智能体)"], label="Agent 运行模式",
@@ -263,7 +219,7 @@ def create_chat_tab():
             gr.Markdown("---")
 
             model_dropdown = gr.Dropdown(
-                choices=[("智谱 GLM-5.1", "glm-4-flash"), ("通义千问 Qwen-Max", "qwen-max"),
+                choices=[("智谱 GLM-4-Plus (最新)", "glm-4-plus"), ("通义千问 Qwen-Max", "qwen-max"),
                          ("MiniMax 2.5", "abab6.5s-chat")],
                 label="🧠 切换大模型", value="qwen-max", info="通过 Higress 网关统一调用"
             )
@@ -288,7 +244,14 @@ def create_chat_tab():
     refresh_skills_btn.click(fn=lambda: gr.update(choices=get_dynamic_skills()), inputs=[],
                              outputs=[multi_agent_checkboxes])
 
-    chat_input.submit(
+    # ==============================
+    # 交互事件：发送与停止逻辑
+    # ==============================
+    generate_event = chat_input.submit(
+        fn=lambda: (gr.update(interactive=False), gr.update(visible=True)),
+        inputs=[],
+        outputs=[chat_input, stop_btn]
+    ).then(
         fn=chat,
         inputs=[
             chat_input, chatbot, state_messages,
@@ -297,6 +260,21 @@ def create_chat_tab():
             agent_mode, multi_agent_checkboxes
         ],
         outputs=[chatbot, chat_input, state_messages, current_chat_id]
+    )
+
+    # 成功生成完后恢复按钮状态
+    generate_event.then(
+        fn=lambda: (gr.update(interactive=True), gr.update(visible=False)),
+        inputs=[],
+        outputs=[chat_input, stop_btn]
+    )
+
+    # 点击停止按钮中断生成，并恢复状态
+    stop_btn.click(
+        fn=lambda: (gr.update(interactive=True), gr.update(visible=False)),
+        inputs=[],
+        outputs=[chat_input, stop_btn],
+        cancels=[generate_event]
     )
 
     chatbot.select(fn=toggle_message_tts, inputs=[], outputs=[])
