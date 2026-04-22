@@ -23,6 +23,25 @@ except Exception as e:
     tavily_search = None
 
 @tool
+def duckduckgo_search(query: str) -> str:
+    """
+    【核心工具：互联网搜索】
+    当你需要查询外部实时信息、新闻、文档或查找外部网站网址时，必须优先使用此工具进行搜索。
+    """
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+            if not results:
+                return "未找到搜索结果。"
+            res_str = ""
+            for i, r in enumerate(results):
+                res_str += f"{i+1}. {r['title']}\nURL: {r['href']}\n摘要: {r['body']}\n\n"
+            return res_str
+    except Exception as e:
+        return f"搜索失败: {e}"
+
+@tool
 def fetch_url(url: str) -> str:
     """抓取网页内容。"""
     try:

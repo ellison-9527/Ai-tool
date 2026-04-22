@@ -12,11 +12,26 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "
 VISUALIZATION_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mcp_servers", "visualization_server.py")
 
 
-async def get_langchain_mcp_tools():
-    """【新增核心】直接返回 LangChain 原生工具列表，供 Agent 大脑使用"""
+def get_available_servers():
+    """获取所有已启用的 MCP 服务名称"""
+    active_servers = []
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                servers = json.load(f)
+                for name, config in servers.items():
+                    if config.get("enable", False):
+                        active_servers.append(name)
+        except Exception:
+            pass
+    if os.path.exists(VISUALIZATION_SCRIPT_PATH):
+        active_servers.append("visual_server")
+    return active_servers
+
+async def get_mcp_tools_by_server():
+    """按服务器分组返回 MCP 工具，供沙箱隔离鉴权使用"""
     active_servers = {}
 
-    # 1. 读取并加载 mcp_server.json 中启用的外部服务 (如 12306, 天气等)
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             try:
@@ -31,25 +46,35 @@ async def get_langchain_mcp_tools():
             except Exception as e:
                 logger.error(f"⚠️ 读取 MCP 配置文件失败: {e}")
 
-        # 2. 【核心新增】代码层动态注入我们刚刚写好的“可视化服务”
         if os.path.exists(VISUALIZATION_SCRIPT_PATH):
             active_servers["visual_server"] = {
-                "command": sys.executable,  # 使用当前虚拟环境的 Python
+                "command": sys.executable,
                 "args": [VISUALIZATION_SCRIPT_PATH],
-                "transport": "stdio"  # <--- 【新增这行】显式声明通信协议
+                "transport": "stdio"
             }
-            logger.info("📊 成功将 [可视化数据] MCP Server 加入挂载队列！")
-    # 如果没有任何服务，直接返回空
+            
     if not active_servers:
-        return []
+        return {}
 
-    try:
-        # 通过 LangChain 的适配器统一连接所有启用的 MCP 服务
-        mcp_client = MultiServerMCPClient(active_servers)
-        return await mcp_client.get_tools()
-    except Exception as e:
-        logger.error(f"❌ 【MCP引擎】连接外部服务失败，请检查服务路径或依赖: {e}")
-        return []
+    server_tools = {}
+    for name, cfg in active_servers.items():
+        try:
+            mcp_client = MultiServerMCPClient({name: cfg})
+            tools = await mcp_client.get_tools()
+            server_tools[name] = tools
+            logger.info(f"✅ 成功加载 MCP 环境: [{name}] (包含 {len(tools)} 个工具)")
+        except Exception as e:
+            logger.error(f"❌ 加载 MCP 环境 [{name}] 失败: {e}")
+            
+    return server_tools
+
+async def get_langchain_mcp_tools():
+    """向下兼容的全局获取接口"""
+    server_tools = await get_mcp_tools_by_server()
+    flat_tools = []
+    for tools in server_tools.values():
+        flat_tools.extend(tools)
+    return flat_tools
 
 
 async def get_dynamic_mcp_tools():

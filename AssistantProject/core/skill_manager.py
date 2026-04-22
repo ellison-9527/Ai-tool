@@ -86,8 +86,9 @@ def get_skill_choices():
 def load_skill_detail(skill_name):
     skills = get_all_skills()
     if skill_name in skills:
-        return skills[skill_name]["description"] or "", skills[skill_name]["prompt"] or ""
-    return "", ""
+        file_count = len(skills[skill_name].get("files", []))
+        return skills[skill_name]["description"] or "", skills[skill_name]["prompt"] or "", f"📎 关联文件: {file_count} 个"
+    return "", "", "📎 关联文件: 0 个"
 
 
 def save_skill(old_name, new_name, desc, prompt, script_files=None, ref_files=None):

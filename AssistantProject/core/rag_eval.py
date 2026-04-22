@@ -5,7 +5,10 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from AssistantProject.core.rag_manager import retrieve_documents
 
 
-def run_rag_evaluation(kb_name, query, target_model="qwen-max"):
+def run_rag_evaluation(kb_name, query, target_model=None):
+    import os
+    if not target_model:
+        target_model = os.getenv("MODEL_NAME", "glm-4-plus")
     """执行完整的 RAG 评测管线"""
     if not kb_name or not query:
         return "⚠️ 请提供知识库名称和测试问题。"

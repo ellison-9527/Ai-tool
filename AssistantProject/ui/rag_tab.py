@@ -4,7 +4,9 @@ from AssistantProject.core.rag_manager import (
     process_and_store_documents,
     retrieve_documents,
     delete_knowledge_base,
-    get_kb_list
+    get_kb_list,
+    get_kb_files,
+    delete_file_from_kb
 )
 # 【新增】引入我们刚写的评估模块
 from AssistantProject.core.rag_eval import run_rag_evaluation
@@ -34,10 +36,10 @@ def create_rag_tab():
                 chunk_overlap = gr.Number(label="分块重叠 (Overlap)", value=50)
                 gr.Markdown("---")
                 retrieval_strategy = gr.Dropdown(
-                    choices=["基础向量检索 (当前)", "混合检索 + BGE Rerank", "自适应 RAG"],
+                    choices=["基础向量检索 (当前)", "混合检索 + BGE Rerank", "自适应 RAG", "自我纠正 RAG"],
                     label="检索模式",
                     value="混合检索 + BGE Rerank",
-                    info="（开发中）选择不同的检索及重排算法模型"
+                    info="选择不同的检索及重排算法模型"
                 )
 
             process_btn = gr.Button("🚀 解析并注入知识库", variant="primary")
@@ -56,9 +58,25 @@ def create_rag_tab():
                 delete_kb_btn = gr.Button("🗑️ 删除该库", size="sm", variant="stop")
 
             gr.Markdown("---")
+            
+            gr.Markdown("#### 2.5 文档级精细化管理")
+            with gr.Row():
+                doc_dropdown = gr.Dropdown(
+                    choices=[],
+                    label="该知识库中包含的文档",
+                    interactive=True
+                )
+                refresh_docs_btn = gr.Button("🔄 刷新文档列表", size="sm")
+                delete_doc_btn = gr.Button("✂️ 从库中剔除该文档", size="sm", variant="stop")
+
+            gr.Markdown("---")
 
             gr.Markdown("#### 3. 🔍 检索与评测中心")
             test_query = gr.Textbox(label="输入测试问题", placeholder="例如：本文档的核心观点是什么？")
+            eval_model_dropdown = gr.Dropdown(
+                choices=[("智谱 GLM-4-Plus (最新)", "glm-4-plus"), ("通义千问 Qwen-Max", "qwen-max"), ("MiniMax 2.5", "abab6.5s-chat")],
+                label="选择评估与路由模型 (供自适应与纠正 RAG 使用)", value="qwen-max"
+            )
 
             with gr.Row():
                 test_btn = gr.Button("1️⃣ 仅获取底层检索片段")
@@ -72,6 +90,20 @@ def create_rag_tab():
 
     # --- 事件绑定 ---
 
+    def ui_process_docs(files, kb_name, c_size, c_overlap):
+        try:
+            msg = process_and_store_documents(files, kb_name, c_size, c_overlap)
+            return msg, gr.update(choices=get_kb_list(), value=kb_name)
+        except Exception as e:
+            return f"⚠️ 失败: {e}", gr.update()
+
+    def ui_delete_kb(kb_name):
+        try:
+            msg = delete_knowledge_base(kb_name)
+            return msg, gr.update(choices=get_kb_list(), value=None)
+        except Exception as e:
+            return f"⚠️ 删除失败: {e}", gr.update()
+
     refresh_kb_btn.click(
         fn=lambda: gr.update(choices=get_kb_list()),
         inputs=[],
@@ -79,20 +111,41 @@ def create_rag_tab():
     )
 
     process_btn.click(
-        fn=process_and_store_documents,
+        fn=ui_process_docs,
         inputs=[uploaded_files, kb_name_input, chunk_size, chunk_overlap],
         outputs=[status_box, kb_dropdown]
     )
 
     delete_kb_btn.click(
-        fn=delete_knowledge_base,
+        fn=ui_delete_kb,
         inputs=[kb_dropdown],
         outputs=[status_box, kb_dropdown]
     )
 
+    # ==== 细粒度文档管理事件 ====
+    def update_doc_dropdown(kb):
+        return gr.update(choices=get_kb_files(kb), value=None)
+
+    kb_dropdown.change(fn=update_doc_dropdown, inputs=[kb_dropdown], outputs=[doc_dropdown])
+    refresh_docs_btn.click(fn=update_doc_dropdown, inputs=[kb_dropdown], outputs=[doc_dropdown])
+
+    def ui_delete_doc(kb_name, file_name):
+        try:
+            msg = delete_file_from_kb(kb_name, file_name)
+            return msg, gr.update(choices=get_kb_files(kb_name), value=None)
+        except Exception as e:
+            return f"⚠️ 失败: {e}", gr.update()
+
+    delete_doc_btn.click(
+        fn=ui_delete_doc,
+        inputs=[kb_dropdown, doc_dropdown],
+        outputs=[status_box, doc_dropdown]
+    )
+    # ==========================
+
     test_btn.click(
-        fn=retrieve_documents,
-        inputs=[kb_dropdown, test_query, retrieval_strategy],
+        fn=lambda kb, q, s, m: retrieve_documents(kb, q, s, 2, m),
+        inputs=[kb_dropdown, test_query, retrieval_strategy, eval_model_dropdown],
         outputs=[test_result]
     )
 

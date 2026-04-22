@@ -8,6 +8,7 @@ from ui.mcp_tab import create_mcp_tab
 from ui.rag_tab import create_rag_tab
 # 【新增】引入刚才写好的 Skill 页面
 from ui.skill_tab import create_skill_tab
+from ui.team_tab import create_team_tab
 
 # 获取项目根目录下的 workspace 绝对路径
 workspace_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "workspace"))
@@ -27,8 +28,10 @@ def create_app():
                 create_mcp_tab()
 
             with gr.Tab("🧩 Skill 配置"):
-                # 【修改】替换掉之前的 Markdown 提示，挂载页面
                 create_skill_tab()
+                
+            with gr.Tab("👥 团队编排"):
+                create_team_tab()
 
     return demo
 

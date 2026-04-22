@@ -13,6 +13,8 @@ from AssistantProject.core.agent import simple_agent_chat, get_asr_text
 from AssistantProject.core.rag_manager import get_kb_list
 from AssistantProject.core.db_manager import get_all_sessions, load_session, save_session, delete_session
 from AssistantProject.core.skill_manager import get_skill_prompts_map, get_skill_choices as get_dynamic_skills
+from AssistantProject.core.team_manager import get_teams
+from AssistantProject.core.mcp_manager import get_available_servers
 from AssistantProject.core.logger import logger
 from AssistantProject.core.utils import generate_chat_title, process_user_input, extract_markdown_images
 
@@ -72,7 +74,7 @@ def ui_delete_chat(display_name, current_chat_id):
 
 
 async def chat(message, history, state_messages, system_prompt, max_token, temperature, kb_name, target_model,
-               current_chat_id, agent_mode, selected_skills):
+               current_chat_id, agent_mode, selected_skills, selected_custom_team, allowed_mcp_servers):
     user_text = message.get("text", "")
     files = message.get("files", [])
 
@@ -89,7 +91,7 @@ async def chat(message, history, state_messages, system_prompt, max_token, tempe
 
     final_sys_prompt = system_prompt
     expert_prompts_map = None
-    if agent_mode == "👥 专家团队模式 (多智能体)" and selected_skills:
+    if agent_mode == "👥 动态路由团队 (Router-Worker)" and selected_skills:
         expert_prompts_map = get_skill_prompts_map(selected_skills)
 
     try:
@@ -102,7 +104,10 @@ async def chat(message, history, state_messages, system_prompt, max_token, tempe
                 target_model=target_model,
                 thread_id=current_chat_id,
                 kb_name=kb_name,
-                expert_prompts_map=expert_prompts_map
+                expert_prompts_map=expert_prompts_map,
+                agent_mode=agent_mode,
+                custom_team_id=selected_custom_team,
+                allowed_mcp_servers=allowed_mcp_servers
         ):
             if is_first_response:
                 if history and history[-1].get("metadata", {}).get("title") == "🤔 思考中":
@@ -208,7 +213,7 @@ def create_chat_tab():
                 stop_btn = gr.Button("🛑 停止", variant="stop", visible=False, scale=1, min_width=60)
 
         with gr.Column(scale=2):
-            agent_mode = gr.Radio(choices=["🤖 单体全能模式", "👥 专家团队模式 (多智能体)"], label="Agent 运行模式",
+            agent_mode = gr.Radio(choices=["🤖 单体全能模式", "👥 动态路由团队 (Router-Worker)", "🏭 流水线审查团队 (Writer-Reviewer)", "⚖️ 深度辩论团队 (Proposer-Critic)", "⚙️ 自定义流水线 (动态编排)"], label="Agent 运行模式",
                                   value="🤖 单体全能模式")
 
             with gr.Group(visible=False) as multi_agent_group:
@@ -216,6 +221,12 @@ def create_chat_tab():
                 multi_agent_checkboxes = gr.CheckboxGroup(choices=get_dynamic_skills(), value=[],
                                                           label="选择本局对话启用的 Skill", interactive=True)
                 refresh_skills_btn = gr.Button("🔄 刷新 Skill 列表", size="sm")
+                
+            with gr.Group(visible=False) as custom_team_group:
+                gr.Markdown("#### ⚙️ 选择你编排的流水线团队")
+                custom_team_dropdown = gr.Dropdown(choices=get_teams(), label="选择团队", interactive=True)
+                refresh_team_btn = gr.Button("🔄 刷新团队列表", size="sm")
+                
             gr.Markdown("---")
 
             model_dropdown = gr.Dropdown(
@@ -236,13 +247,27 @@ def create_chat_tab():
                 system_prompt = gr.Text(label="系统提示词", lines=2, value="你是一个精通编程和数据分析的 AI 助手。")
                 max_token = gr.Number(label="Maxtoken", value=4096, interactive=True)
                 temperature = gr.Number(label="temperature", value=0.5, interactive=True)
+                gr.Markdown("#### 🔌 MCP 沙箱环境隔离")
+                available_servers = get_available_servers()
+                mcp_servers_checkbox = gr.CheckboxGroup(
+                    choices=available_servers,
+                    value=available_servers,
+                    label="动态挂载外部服务",
+                    info="只为当前对话挂载勾选的工具，避免 Token 浪费与越权操作"
+                )
+                refresh_mcp_btn = gr.Button("🔄 刷新 MCP 服务", size="sm")
 
     def toggle_agent_mode(mode):
-        return gr.update(visible=True) if mode == "👥 专家团队模式 (多智能体)" else gr.update(visible=False)
+        return (
+            gr.update(visible=(mode == "👥 动态路由团队 (Router-Worker)")),
+            gr.update(visible=(mode == "⚙️ 自定义流水线 (动态编排)"))
+        )
 
-    agent_mode.change(fn=toggle_agent_mode, inputs=[agent_mode], outputs=[multi_agent_group])
+    agent_mode.change(fn=toggle_agent_mode, inputs=[agent_mode], outputs=[multi_agent_group, custom_team_group])
     refresh_skills_btn.click(fn=lambda: gr.update(choices=get_dynamic_skills()), inputs=[],
                              outputs=[multi_agent_checkboxes])
+    refresh_team_btn.click(fn=lambda: gr.update(choices=get_teams()), inputs=[], outputs=[custom_team_dropdown])
+    refresh_mcp_btn.click(fn=lambda: gr.update(choices=get_available_servers(), value=get_available_servers()), inputs=[], outputs=[mcp_servers_checkbox])
 
     # ==============================
     # 交互事件：发送与停止逻辑
@@ -257,7 +282,8 @@ def create_chat_tab():
             chat_input, chatbot, state_messages,
             system_prompt, max_token, temperature,
             kb_dropdown, model_dropdown, current_chat_id,
-            agent_mode, multi_agent_checkboxes
+            agent_mode, multi_agent_checkboxes, custom_team_dropdown,
+            mcp_servers_checkbox
         ],
         outputs=[chatbot, chat_input, state_messages, current_chat_id]
     )

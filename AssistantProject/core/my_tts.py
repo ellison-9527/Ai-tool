@@ -157,9 +157,6 @@ async def continue_task_with_stream_play(
             print(f"网络流中断: {e}")
             break
 
-    estimated_duration = total_audio_size * 0.0625 / 1000
-    return min(max(estimated_duration, 2), 30)
-
 
 async def tts(text: str, api_key: Optional[str] = None):
     global ACTIVE_PLAYER, FORCE_STOP
@@ -186,10 +183,17 @@ async def tts(text: str, api_key: Optional[str] = None):
         if not await start_task(ws):
             return
 
-        wait_time = await continue_task_with_stream_play(ws, text, player)
+        await continue_task_with_stream_play(ws, text, player)
 
-        # 自然等待期间，也能响应取消指令
-        for _ in range(int(wait_time * 10)):
+        # 数据流接收完毕后关闭 stdin，这会告诉 mpv 数据已发送完毕，mpv 会在播完后自然退出
+        if player.mpv_process and player.mpv_process.stdin:
+            try:
+                player.mpv_process.stdin.close()
+            except Exception:
+                pass
+
+        # 自然等待 MPV 播放完毕，期间能随时响应取消指令
+        while player.mpv_process and player.mpv_process.poll() is None:
             if FORCE_STOP:
                 break
             await asyncio.sleep(0.1)

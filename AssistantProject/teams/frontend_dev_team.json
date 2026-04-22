@@ -1,0 +1,14 @@
+{
+    "team_id": "frontend_dev_team",
+    "team_name": "现代前端开发组",
+    "nodes": [
+        {
+            "name": "节",
+            "prompt": "点"
+        },
+        {
+            "name": "系",
+            "prompt": "统"
+        }
+    ]
+}

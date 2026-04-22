@@ -192,14 +192,13 @@ def get_kb_list():
 
 
 def process_and_store_documents(file_paths, kb_name, chunk_size, chunk_overlap):
-    import gradio as gr
     if not file_paths:
-        return "⚠️ 请先上传文件！", gr.update(choices=get_kb_list())
+        raise ValueError("请先上传文件！")
     if not kb_name:
-        return "⚠️ 请输入知识库名称！", gr.update(choices=get_kb_list())
+        raise ValueError("请输入知识库名称！")
 
     if re.search(r'[^a-zA-Z0-9_]', kb_name):
-        return "⚠️ 知识库名称仅支持【英文、数字、下划线】！", gr.update()
+        raise ValueError("知识库名称仅支持【英文、数字、下划线】！")
 
     safe_kb_name = kb_name
     
@@ -207,7 +206,7 @@ def process_and_store_documents(file_paths, kb_name, chunk_size, chunk_overlap):
         client = get_milvus_client()
         bge_ef = get_bge_m3_ef()
     except Exception as e:
-        return f"⚠️ 核心组件加载失败: {e}", gr.update()
+        raise RuntimeError(f"核心组件加载失败: {e}")
 
     try:
         if not client.has_collection(collection_name=safe_kb_name):
@@ -230,7 +229,7 @@ def process_and_store_documents(file_paths, kb_name, chunk_size, chunk_overlap):
             logger.info(f"✨ 成功创建知识库集合: {safe_kb_name}")
     except Exception as e:
         logger.error(f"❌ 创建集合失败: {e}")
-        return f"⚠️ 创建知识库失败: {e}", gr.update()
+        raise RuntimeError(f"创建知识库失败: {e}")
 
     total_chunks = 0
     for file_path in file_paths:
@@ -282,14 +281,14 @@ def process_and_store_documents(file_paths, kb_name, chunk_size, chunk_overlap):
             logger.info("✅ 知识库就绪！")
         except Exception as e:
             logger.error(f"⚠️ 知识库落盘失败: {e}")
-            return f"⚠️ 数据已插入，但知识库加载失败: {e}", gr.update()
+            raise RuntimeError(f"数据已插入，但知识库加载失败: {e}")
     else:
-        return "⚠️ 未能从文件中提取到有效内容，知识库构建失败。", gr.update()
+        raise ValueError("未能从文件中提取到有效内容，知识库构建失败。")
 
-    return f"✅ 成功！知识库 [{safe_kb_name}] 注入 {total_chunks} 个片段 (语义级切片 | GPU加速)。", gr.update(choices=get_kb_list(), value=safe_kb_name)
+    return f"✅ 成功！知识库 [{safe_kb_name}] 注入 {total_chunks} 个片段 (语义级切片 | GPU加速)。"
 
 
-def retrieve_documents(kb_name, query_text, strategy="混合检索 + BGE Rerank", top_k=3):
+def retrieve_documents(kb_name, query_text, strategy="混合检索 + BGE Rerank", top_k=2, target_model="qwen-max"):
     if not kb_name: return "⚠️ 请先在上方选择一个知识库！"
     if not query_text.strip(): return "⚠️ 请输入测试问题！"
     
@@ -299,12 +298,23 @@ def retrieve_documents(kb_name, query_text, strategy="混合检索 + BGE Rerank"
     except Exception as e:
         return f"⚠️ 底层组件加载失败: {e}"
 
-    # 自适应 RAG 雏形判断
+    # 1. 自适应 RAG (Adaptive RAG) - 意图路由
     if strategy == "自适应 RAG":
-        idle_chat_keywords = ["你好", "你是谁", "介绍一下自己", "hello", "hi"]
-        if any(kw in query_text.lower() for kw in idle_chat_keywords):
-            return "💡 [自适应 RAG 判定] 当前问题被识别为日常闲聊，无需查询知识库。"
-        strategy = "混合检索 + BGE Rerank" # 降级执行检索
+        try:
+            from AssistantProject.core.agent import get_llm
+            from langchain_core.messages import SystemMessage, HumanMessage
+            
+            router_llm = get_llm(target_model, 100, 0.1)
+            sys_msg = "你是一个智能路由系统。请判断用户的输入是否属于日常闲聊、打招呼等无需查阅专业知识库的内容。如果是闲聊，请回复 'CHITCHAT'，如果需要专业知识，请回复 'KNOWLEDGE_BASE'。请仅回复这两个词之一。"
+            res = router_llm.invoke([SystemMessage(content=sys_msg), HumanMessage(content=query_text)])
+            if "CHITCHAT" in res.content:
+                return "💡 [自适应 RAG 判定] 当前问题被识别为日常闲聊，无需查询知识库。"
+            
+            # 继续执行知识库检索
+            strategy = "混合检索 + BGE Rerank"
+        except Exception as e:
+            logger.warning(f"自适应 RAG 路由失败: {e}，降级为普通检索")
+            strategy = "混合检索 + BGE Rerank"
 
     try:
         if not client.has_collection(collection_name=kb_name):
@@ -350,14 +360,41 @@ def retrieve_documents(kb_name, query_text, strategy="混合检索 + BGE Rerank"
             rerank_results = reranker(query=query_text, documents=[c["text"] for c in candidates])
 
             final_top_k = []
-            for res in rerank_results[:top_k]:
-                doc = candidates[res.index]
-                doc["rerank_score"] = res.score
-                final_top_k.append(doc)
+            for res in rerank_results:
+                if res.score > 0.3:  # 提高阈值，过滤低关联度文本（>0.3更严格）
+                    doc = candidates[res.index]
+                    doc["rerank_score"] = res.score
+                    final_top_k.append(doc)
+                if len(final_top_k) >= top_k:
+                    break
+                    
+            if not final_top_k:
+                return "📭 未在知识库中找到高关联性的内容 (已自动过滤低分垃圾片段)。"
 
-            res_str = "💡 [当前模式：混合检索 + BGE Rerank]\n\n"
+            res_str = f"💡 [当前模式：{strategy}]\n\n"
             for i, hit in enumerate(final_top_k):
                 res_str += f"📄 【片段 {i + 1}】 (来源: {hit['source']} | 重排打分: {hit['rerank_score']:.4f})\n{hit['text']}\n" + "-" * 40 + "\n\n"
+            
+            # 2. 自我纠正 RAG (Self-Corrective RAG)
+            if strategy == "自我纠正 RAG":
+                try:
+                    from AssistantProject.core.agent import get_llm
+                    from langchain_core.messages import SystemMessage, HumanMessage
+                    
+                    eval_llm = get_llm(target_model, 100, 0.1)
+                    context_text = "\n".join([c["text"] for c in final_top_k])
+                    sys_msg = "你是一个检索评估员。请判断提供的参考资料是否能够回答用户的问题。如果完全不相关或无法回答，请回复 'IRRELEVANT'，并给出一个重写后的更清晰的查询建议。如果相关，请回复 'RELEVANT'。请严格按照 '判断结果|重写建议' 的格式返回，例如 'IRRELEVANT|什么是XXX'"
+                    res = eval_llm.invoke([
+                        SystemMessage(content=sys_msg),
+                        HumanMessage(content=f"参考资料: {context_text}\n用户问题: {query_text}")
+                    ])
+                    
+                    if "IRRELEVANT" in res.content:
+                        suggestion = res.content.split("|")[-1].strip() if "|" in res.content else query_text
+                        res_str = f"> [!WARNING]\n> **自我纠正 RAG 判定：检索失败**\n> 检索到的资料可能与问题无关。系统建议大模型将问题重写为: `{suggestion}`，并直接使用自身知识库回答。\n\n---\n" + res_str
+                except Exception as e:
+                    logger.warning(f"自我纠正 RAG 评估失败: {e}")
+
             return res_str.strip()
     except Exception as e:
         logger.error(f"❌ 检索失败: {e}")
@@ -365,14 +402,53 @@ def retrieve_documents(kb_name, query_text, strategy="混合检索 + BGE Rerank"
 
 
 def delete_knowledge_base(kb_name):
-    import gradio as gr
-    if not kb_name: return "⚠️ 请先在下拉列表中选择要删除的知识库", gr.update()
+    if not kb_name: 
+        raise ValueError("请先在下拉列表中选择要删除的知识库")
     try:
         client = get_milvus_client()
         if client.has_collection(collection_name=kb_name):
             client.drop_collection(collection_name=kb_name)
         logger.info(f"🗑️ 已成功彻底删除知识库: {kb_name}")
-        return f"🗑️ 已成功彻底删除知识库: {kb_name}", gr.update(choices=get_kb_list(), value=None)
+        return f"🗑️ 已成功彻底删除知识库: {kb_name}"
     except Exception as e:
         logger.error(f"❌ 删除知识库 {kb_name} 失败: {e}")
-        return f"⚠️ 删除失败: {e}", gr.update()
+        raise RuntimeError(f"删除失败: {e}")
+
+# ==========================================
+# 4. 细粒度文档管理 (CRUD at Document Level)
+# ==========================================
+def get_kb_files(kb_name):
+    if not kb_name:
+        return []
+    try:
+        client = get_milvus_client()
+        if not client.has_collection(collection_name=kb_name):
+            return []
+        
+        # 宽泛查询以获取唯一的 source
+        res = client.query(
+            collection_name=kb_name,
+            filter="id >= 0", 
+            output_fields=["source"],
+            limit=16384
+        )
+        unique_sources = list(set([hit["source"] for hit in res]))
+        return sorted(unique_sources)
+    except Exception as e:
+        logger.error(f"❌ 获取知识库文件列表失败: {e}")
+        return []
+
+def delete_file_from_kb(kb_name, file_name):
+    if not kb_name or not file_name:
+        raise ValueError("请提供知识库名称和要删除的文件名！")
+    try:
+        client = get_milvus_client()
+        if not client.has_collection(collection_name=kb_name):
+            raise ValueError(f"知识库 {kb_name} 不存在。")
+            
+        client.delete(collection_name=kb_name, filter=f"source == '{file_name}'")
+        logger.info(f"🗑️ 已成功从知识库 {kb_name} 中删除文件: {file_name}")
+        return f"✅ 成功从知识库 [{kb_name}] 删除文档: {file_name}"
+    except Exception as e:
+        logger.error(f"❌ 删除知识库文件失败: {e}")
+        raise RuntimeError(f"删除文档失败: {e}")

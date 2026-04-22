@@ -66,7 +66,7 @@ def create_skill_tab():
     gr.Markdown("### 🧩 Skill 技能扩展包管理 (装备库模式)")
     choices = get_skill_choices()
     default_name = choices[0] if choices else None
-    default_desc, default_prompt = load_skill_detail(default_name)
+    default_desc, default_prompt, default_stats = load_skill_detail(default_name)
 
     with gr.Row():
         with gr.Column(scale=2):
@@ -75,6 +75,7 @@ def create_skill_tab():
             with gr.Row():
                 new_btn = gr.Button("✨ 手动新建", variant="secondary", size="sm")
                 delete_btn = gr.Button("🗑️ 删除选中", variant="stop", size="sm")
+            stats_box = gr.Markdown(value=default_stats)
             status_box = gr.Textbox(label="操作状态", lines=2, interactive=False)
 
         with gr.Column(scale=6):
@@ -101,10 +102,10 @@ def create_skill_tab():
 
             save_btn = gr.Button("💾 封装全套包并保存至 skills/ 目录", variant="primary")
 
-    skill_list.change(fn=load_skill_detail, inputs=[skill_list], outputs=[desc_in, prompt_in]).then(fn=lambda x: x,
+    skill_list.change(fn=load_skill_detail, inputs=[skill_list], outputs=[desc_in, prompt_in, stats_box]).then(fn=lambda x: x,
                                                                                                     inputs=[skill_list],
                                                                                                     outputs=[name_in])
-    new_btn.click(fn=lambda: (None, "", "", ""), outputs=[skill_list, name_in, desc_in, prompt_in])
+    new_btn.click(fn=lambda: (None, "", "", "", "📎 关联文件: 0 个"), outputs=[skill_list, name_in, desc_in, prompt_in, stats_box])
 
     # 绑定保存事件，带上文件上传参数
     save_btn.click(
